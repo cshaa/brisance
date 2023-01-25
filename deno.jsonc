@@ -1,7 +1,7 @@
 {
   "lint": {
     "rules": {
-      "exclude": ["no-namespace"]
+      "exclude": ["no-namespace", "no-explicit-any"]
     }
   }
 }

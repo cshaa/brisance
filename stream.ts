@@ -1,27 +1,66 @@
-/** A user-friendly wrapper around AsyncIterator that allows for peek-forwards and rewind-backs. */
-export class Stream<T> {
+const isIterable = <T>(value: T): value is Extract<T, Iterable<any>> => typeof (value as any)?.[Symbol.iterator] === "function";
+const isAsyncIterable = <T>(value: T): value is Extract<T, AsyncIterable<any>> =>
+  typeof (value as any)?.[Symbol.asyncIterator] === "function";
+
+/**
+ * A user-friendly wrapper around AsyncIterator that allows
+ * for status updates, peek-forwards and rewind-backs.
+ */
+export class Stream<T, S = undefined> {
   private iterator: Iterator<T> | AsyncIterator<T>;
   private buffer: T[] = [];
   private currentPeek: Peek<T> | undefined;
-
-  constructor(iterator: Iterator<T> | Iterable<T> | AsyncIterator<T> | AsyncIterable<T>) {
-    if (Symbol.iterator in iterator) iterator = iterator[Symbol.iterator]();
-    if (Symbol.asyncIterator in iterator) iterator = iterator[Symbol.asyncIterator]();
-    this.iterator = iterator;
+  private _status: S | undefined;
+  get status(): S {
+    return this._status!;
   }
 
-  /** Consume another value from the iterator, or return Stream.End if the iterator is done. */
-  async next(): Promise<T | Stream.End> {
-    const { iterator, buffer, currentPeek } = this;
+  constructor(iterator: Iterator<T> | Iterable<T> | AsyncIterator<T> | AsyncIterable<T>);
+  constructor(
+    iterator: Iterator<T> | Iterable<T> | AsyncIterator<T> | AsyncIterable<T>,
+    defaultStatus: S,
+    statusUpdater: (newValue: T, previousStatus: S) => S
+  );
 
-    if (currentPeek) throw new Error("Cannot continue in the stream while there is an active peek.");
+  constructor(
+    iterator: Iterator<T> | Iterable<T> | AsyncIterator<T> | AsyncIterable<T>,
+    defaultStatus?: S,
+    private statusUpdater?: (newValue: T, previousStatus: S) => S
+  ) {
+    if (isIterable(iterator)) iterator = iterator[Symbol.iterator]();
+    if (isAsyncIterable(iterator)) iterator = iterator[Symbol.asyncIterator]();
+    this.iterator = iterator;
+    this._status = defaultStatus;
+  }
 
-    if (buffer.length > 0) return buffer.pop()!;
+  private peekItem = async (): Promise<T | Stream.End> => {
+    const { iterator, buffer } = this;
+
+    if (buffer.length > 0) return buffer.shift()!;
 
     const { value, done } = await iterator.next();
     if (done) return Stream.End;
     else return value;
-  }
+  };
+
+  private consumeItem = (item: T) => {
+    this._status = this.statusUpdater?.(item, this._status!);
+  };
+
+  /**
+   * Consume another value from the iterator updating the status,
+   * or return Stream.End if the iterator is done.
+   */
+  next = async (): Promise<T | Stream.End> => {
+    const { currentPeek, peekItem, consumeItem } = this;
+
+    if (currentPeek) throw new Error("Cannot continue in the stream while there is an active peek.");
+
+    const item = await peekItem();
+    if (item !== Stream.End) consumeItem(item);
+
+    return item;
+  };
 
   /**
    * Register a new cursor to preview the next items before deciding whether
@@ -29,16 +68,18 @@ export class Stream<T> {
    * before creating another one or calling next on the stream, be sure to
    * revoke or consume the peek.
    */
-  peek(): Peek<T> {
-    if (this.currentPeek) throw new Error("There already is an active peek.");
+  peek = (): Peek<T> => {
+    const { currentPeek, peekItem, consumeItem } = this;
+    if (currentPeek) throw new Error("There already is an active peek.");
 
-    const returnItems = (items: T[]) => void this.buffer.push(...items);
+    const returnItems = (items: T[]) => (this.buffer = [...items, ...this.buffer]);
+    const consumeItems = (items: T[]) => items.forEach(consumeItem);
     const onDestroy = () => (this.currentPeek = undefined);
-    const peek = new Peek(this, returnItems, onDestroy);
+    const peek = new Peek(peekItem, returnItems, consumeItems, onDestroy);
 
     this.currentPeek = peek;
     return peek;
-  }
+  };
 }
 export namespace Stream {
   export const End = Symbol("StreamEnd");
@@ -51,10 +92,15 @@ export namespace Stream {
  * For each stream, only one peek can be active at a time.
  */
 export class Peek<T> implements Iterable<T> {
-  constructor(private stream: Stream<T>, private returnItems: (items: T[]) => void, private destroy: () => void) {}
+  constructor(
+    private peekItem: () => Promise<T | Stream.End>,
+    private returnItems: (items: T[]) => void,
+    private consumeItems: (items: T[]) => void,
+    private destroy: () => void
+  ) {}
 
   private _alive = true;
-  _items: T[] = [];
+  private _items: T[] = [];
   get alive() {
     return this._alive;
   }
@@ -67,9 +113,9 @@ export class Peek<T> implements Iterable<T> {
 
   /** Get one or more items and store them in the preview. */
   async next(n = 1) {
-    const { stream, _items } = this;
+    const { _items, peekItem } = this;
     while (n-- > 0) {
-      const value = await stream.next();
+      const value = await peekItem();
       if (value === Stream.End) break;
       _items.push(value);
     }
@@ -85,14 +131,19 @@ export class Peek<T> implements Iterable<T> {
   /** Return the current items and destroy the peek. */
   consume(): T[] {
     this._alive = false;
-    this.destroy();
-    return this._items;
+    const { _items, consumeItems, destroy } = this;
+
+    consumeItems(_items);
+    destroy();
+    return _items;
   }
 
   /** Rewind all items and destroy the peek. */
   revoke() {
     this._alive = false;
-    this.returnItems(this._items);
-    this.destroy();
+    const { _items, returnItems, destroy } = this;
+
+    returnItems(_items);
+    destroy();
   }
 }
