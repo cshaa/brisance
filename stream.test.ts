@@ -56,6 +56,9 @@ Deno.test("peeking", async (t) => {
   });
 
   assertEquals(await stream.next(), "o");
+
+  await t.step("TODO: peek reaching the end of stream", () => {});
+  await t.step("TODO: peek nextWhile", () => {});
 });
 
 Deno.test("basic status", async () => {

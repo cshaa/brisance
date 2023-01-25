@@ -1,18 +1,26 @@
 const isIterable = <T>(value: T): value is Extract<T, Iterable<any>> => typeof (value as any)?.[Symbol.iterator] === "function";
 const isAsyncIterable = <T>(value: T): value is Extract<T, AsyncIterable<any>> =>
   typeof (value as any)?.[Symbol.asyncIterator] === "function";
+const withoutStreamEnd = <T>(arr: Array<T | Stream.End>): T[] => arr.filter((x): x is T => x !== Stream.End);
 
 /**
  * A user-friendly wrapper around AsyncIterator that allows
  * for status updates, peek-forwards and rewind-backs.
  */
-export class Stream<T, S = undefined> {
+export class Stream<T, S = undefined> implements AsyncIterable<T> {
   private iterator: Iterator<T> | AsyncIterator<T>;
   private buffer: T[] = [];
   private currentPeek: Peek<T> | undefined;
   private _status: S | undefined;
   get status(): S {
     return this._status!;
+  }
+  async *[Symbol.asyncIterator](): AsyncIterator<T, Stream.End> {
+    while (true) {
+      const res = await this.next();
+      if (res === Stream.End) return Stream.End;
+      else yield res;
+    }
   }
 
   constructor(iterator: Iterator<T> | Iterable<T> | AsyncIterator<T> | AsyncIterable<T>);
@@ -100,15 +108,25 @@ export class Peek<T> implements Iterable<T> {
   ) {}
 
   private _alive = true;
-  private _items: T[] = [];
+  private _items: Array<T | Stream.End> = [];
+  private _atEnd = false;
   get alive() {
     return this._alive;
   }
-  get items(): readonly T[] {
+  get items(): ReadonlyArray<T | Stream.End> {
     return this._items;
   }
-  [Symbol.iterator]() {
-    return this._items[Symbol.iterator]();
+  get last(): T | Stream.End | undefined {
+    return this._items.at(-1);
+  }
+  get atEnd() {
+    return this._atEnd;
+  }
+  *[Symbol.iterator]() {
+    for (const el of this.items) {
+      if (el === Stream.End) return;
+      else yield el;
+    }
   }
 
   /** Get one or more items and store them in the preview. */
@@ -116,26 +134,41 @@ export class Peek<T> implements Iterable<T> {
     const { _items, peekItem } = this;
     while (n-- > 0) {
       const value = await peekItem();
-      if (value === Stream.End) break;
+      if (value === Stream.End) {
+        this._atEnd = false;
+        break;
+      }
       _items.push(value);
     }
+  }
+
+  /** Get items while the callback returns true. */
+  async nextWhile(f: (item: T) => boolean) {
+    do {
+      await this.next();
+    } while (this.last !== Stream.End && f(this.last!))
+    this.rewind();
   }
 
   /** Give the last one or more items from the preview back to the stream. */
   rewind(n = 1) {
     const { _items, returnItems } = this;
     n = Math.min(n, _items.length);
-    returnItems(_items.splice(-n));
+    if (n > 0) {
+      this._atEnd = false;
+      returnItems(withoutStreamEnd(_items.splice(-n)));
+    }
   }
 
   /** Return the current items and destroy the peek. */
   consume(): T[] {
     this._alive = false;
     const { _items, consumeItems, destroy } = this;
+    const items: T[] = withoutStreamEnd(_items);
 
-    consumeItems(_items);
+    consumeItems(items);
     destroy();
-    return _items;
+    return items;
   }
 
   /** Rewind all items and destroy the peek. */
@@ -143,7 +176,7 @@ export class Peek<T> implements Iterable<T> {
     this._alive = false;
     const { _items, returnItems, destroy } = this;
 
-    returnItems(_items);
+    returnItems(withoutStreamEnd(_items));
     destroy();
   }
 }
