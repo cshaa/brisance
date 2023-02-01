@@ -17,7 +17,6 @@ export enum TokenKind {
   ParenEnd,
   BracketStart,
   BracketEnd,
-  OperatorSymbol,
   Colon,
   Equals,
   Semicolon,
